@@ -1,6 +1,8 @@
 import ee
 from datetime import datetime, timedelta, date
 import json
+import os
+
 service_account_info = json.loads(os.environ["EE_SERVICE_ACCOUNT_JSON"])
 
 credentials = ee.ServiceAccountCredentials(
