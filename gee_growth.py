@@ -2,11 +2,14 @@ import ee
 from datetime import datetime, timedelta, date
 
 # ee.Initialize() must be called in main file before using this
-try:
-    ee.Authenticate()
-    ee.Initialize(project="cropeye-483404")
-except Exception as e:
-    print(f"Warning: Earth Engine initialization failed: {e}")
+service_account_info = json.loads(os.environ["EE_SERVICE_ACCOUNT_JSON"])
+
+credentials = ee.ServiceAccountCredentials(
+    service_account_info["client_email"],
+    key_data=json.dumps(service_account_info)
+)
+
+ee.Initialize(credentials)
     
 def run_growth_analysis_by_plot(plot_data, start_date, end_date):
     geometry = plot_data["geometry"]
