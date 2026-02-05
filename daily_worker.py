@@ -7,7 +7,7 @@ from datetime import date
 
 # ---------------- ENV ----------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SERVICE_ROLE_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 FASTAPI_URL = os.getenv("FASTAPI_PLOTS_URL")
 WORKER_TOKEN = os.getenv("WORKER_TOKEN")
 
