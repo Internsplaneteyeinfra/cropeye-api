@@ -4,7 +4,7 @@ import requests
 from supabase import create_client
 from gee_growth import run_growth_analysis_by_plot
 from datetime import date
-
+import json
 # ---------------- ENV ----------------
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
