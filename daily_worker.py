@@ -46,8 +46,35 @@ def run():
     print(f"📍 Found {len(plots)} plots")
 
     for plot in plots:
-        plot_name = plot["plot_name"]
-        print(f"\n🌱 Processing plot: {plot_name}")
+       plots = res.json()
+print(f"📍 Found {len(plots)} plots")
+
+for plot_name, plot_data in plots.items():
+    print(f"\n🌱 Processing plot: {plot_name}")
+
+    # ---------------- Get plot_id from Supabase ----------------
+    db_plot = supabase.table("plots") \
+        .select("id") \
+        .eq("plot_name", plot_name) \
+        .execute()
+
+    if not db_plot.data:
+        print("❌ Plot not found in Supabase:", plot_name)
+        continue
+
+    plot_id = db_plot.data[0]["id"]
+
+    # ---------------- GEE Compute ----------------
+    try:
+        result = run_growth_analysis_by_plot(
+            plot_data=plot_data,  # ✅ correct object
+            start_date="2025-01-01",
+            end_date=str(date.today())
+        )
+    except Exception as e:
+        print("❌ GEE failed:", e)
+        continue
+
 
         # ---------------- Get plot_id from Supabase ----------------
         db_plot = supabase.table("plots") \
