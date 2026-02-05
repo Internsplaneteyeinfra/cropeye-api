@@ -1,7 +1,7 @@
 from supabase import create_client
 from dotenv import load_dotenv
 import os
-
+import json
 # Load .env file
 load_dotenv()
 
