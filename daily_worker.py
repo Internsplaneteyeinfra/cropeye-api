@@ -32,7 +32,7 @@ def run():
         headers={"x-worker-token": WORKER_TOKEN}
     )
 
-    plots = res.json()["plots"]
+    plots = res.json()
     print(f"📍 Found {len(plots)} plots")
 
     for plot in plots:
