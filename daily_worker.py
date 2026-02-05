@@ -35,9 +35,26 @@ def run():
     plots = res.json()
     print(f"📍 Found {len(plots)} plots")
 
-    for plot in plots:
-        plot_name = plot["plot_name"]
-        print(f"\n🌱 Processing {plot_name}")
+    for plot_name in plots:
+    print(f"\n🌱 Processing {plot_name}")
+
+    db_plot = supabase.table("plots") \
+        .select("id, geometry") \
+        .eq("plot_name", plot_name) \
+        .execute()
+
+    if not db_plot.data:
+        print("❌ Plot not found:", plot_name)
+        continue
+
+    plot_record = db_plot.data[0]
+
+    result = run_growth_analysis_by_plot(
+        plot_data=plot_record,   # ✅ real geometry
+        start_date="2025-01-01",
+        end_date=str(date.today())
+    )
+
 
         # ---------------- Get plot in DB ----------------
         db_plot = supabase.table("plots") \
