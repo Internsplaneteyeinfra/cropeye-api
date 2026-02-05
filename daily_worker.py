@@ -11,7 +11,7 @@ SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 FASTAPI_URL = os.getenv("FASTAPI_PLOTS_URL")
 WORKER_TOKEN = os.getenv("WORKER_TOKEN")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 print("🚀 Initializing GEE...")
 service_account_info = json.loads(os.environ["EE_SERVICE_ACCOUNT_JSON"])
