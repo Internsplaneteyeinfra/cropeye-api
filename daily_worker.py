@@ -14,11 +14,15 @@ WORKER_TOKEN = os.getenv("WORKER_TOKEN")
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 print("🚀 Initializing GEE...")
-try:
-    ee.Authenticate()
-    ee.Initialize(project="cropeye-483404")
-except Exception as e:
-    print(f"Warning: Earth Engine initialization failed: {e}")
+service_account_info = json.loads(os.environ["EE_SERVICE_ACCOUNT_JSON"])
+
+credentials = ee.ServiceAccountCredentials(
+    service_account_info["client_email"],
+    key_data=json.dumps(service_account_info)
+)
+
+ee.Initialize(credentials)
+
 
 # ---------------- MAIN ----------------
 def run():
