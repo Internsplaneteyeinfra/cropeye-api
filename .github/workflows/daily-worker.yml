@@ -2,7 +2,7 @@ name: CropEye Daily Worker
 
 on:
   schedule:
-    - cron: "0 2 * * *"  # 7:30 AM IST
+    - cron: "0 2 * * *"   # 07:30 AM IST
   workflow_dispatch:
 
 jobs:
@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -20,14 +20,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run daily worker
+      - name: Run CropEye Daily Worker
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          EE_CREDENTIALS: ${{ secrets.EE_CREDENTIALS }}
-          WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          EE_SERVICE_ACCOUNT_JSON: ${{ secrets.EE_SERVICE_ACCOUNT_JSON }}
         run: |
           python daily_worker.py
