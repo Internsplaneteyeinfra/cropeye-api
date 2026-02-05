@@ -7,46 +7,44 @@ from supabase import create_client
 from gee_growth import run_growth_analysis_by_plot
 
 # =====================================================
-# ENVIRONMENT VARIABLES (REQUIRED)
+# REQUIRED ENV
 # =====================================================
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-FASTAPI_PLOTS_URL = os.getenv("FASTAPI_PLOTS_URL")   # e.g. https://cropeye-api.onrender.com/plots
+FASTAPI_PLOTS_URL = os.getenv("FASTAPI_PLOTS_URL")  # ❗ MUST be JSON endpoint, NOT /docs
 WORKER_TOKEN = os.getenv("WORKER_TOKEN")
 EE_JSON = os.getenv("EE_SERVICE_ACCOUNT_JSON")
 
-missing = [
-    name for name, value in {
-        "SUPABASE_URL": SUPABASE_URL,
-        "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_SERVICE_ROLE_KEY,
-        "FASTAPI_PLOTS_URL": FASTAPI_PLOTS_URL,
-        "WORKER_TOKEN": WORKER_TOKEN,
-        "EE_SERVICE_ACCOUNT_JSON": EE_JSON,
-    }.items() if not value
-]
+required = {
+    "SUPABASE_URL": SUPABASE_URL,
+    "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_SERVICE_ROLE_KEY,
+    "FASTAPI_PLOTS_URL": FASTAPI_PLOTS_URL,
+    "WORKER_TOKEN": WORKER_TOKEN,
+    "EE_SERVICE_ACCOUNT_JSON": EE_JSON,
+}
 
+missing = [k for k, v in required.items() if not v]
 if missing:
-    raise RuntimeError(f"❌ Missing environment variables: {missing}")
+    raise RuntimeError(f"❌ Missing env vars: {missing}")
 
 # =====================================================
-# SUPABASE CLIENT
+# SUPABASE
 # =====================================================
 supabase = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # =====================================================
-# GOOGLE EARTH ENGINE INIT (SERVICE ACCOUNT – NO BROWSER)
+# GOOGLE EARTH ENGINE (SERVICE ACCOUNT)
 # =====================================================
 print("🚀 Initializing Google Earth Engine...")
 
-service_account_info = json.loads(EE_JSON)
+sa = json.loads(EE_JSON)
 
 credentials = ee.ServiceAccountCredentials(
-    service_account_info["client_email"],
-    key_data=json.dumps(service_account_info)
+    sa["client_email"],
+    key_data=json.dumps(sa)
 )
 
-ee.Initialize(credentials, project=service_account_info["project_id"])
-
+ee.Initialize(credentials, project=sa["project_id"])
 print("✅ GEE initialized successfully")
 
 # =====================================================
@@ -55,24 +53,42 @@ print("✅ GEE initialized successfully")
 def run():
     print("🛰 Fetching plots from API...")
 
-    response = requests.get(
+    res = requests.get(
         FASTAPI_PLOTS_URL,
         headers={"x-worker-token": WORKER_TOKEN},
         timeout=30
     )
+    res.raise_for_status()
 
-    response.raise_for_status()
-    plots = response.json()   # 🔑 THIS IS A DICT
+    plots = res.json()
+
+    # ---------- HARD VALIDATION ----------
+    if not isinstance(plots, list):
+        raise RuntimeError(
+            f"❌ Expected list from API, got {type(plots)}.\n"
+            f"Check FASTAPI_PLOTS_URL: {FASTAPI_PLOTS_URL}"
+        )
 
     print(f"📍 Found {len(plots)} plots")
 
-    # -------------------------------------------------
-    # plots = { "999_11": {...}, "1001_5": {...} }
-    # -------------------------------------------------
-    for plot_name, plot_data in plots.items():
+    # =================================================
+    # LOOP OVER LIST OF PLOTS
+    # =================================================
+    for plot in plots:
+        if not isinstance(plot, dict):
+            print("⚠️ Skipping invalid plot:", plot)
+            continue
+
+        plot_name = plot.get("plot_name")
+        geometry = plot.get("geometry")
+
+        if not plot_name or not geometry:
+            print("⚠️ Missing plot_name or geometry, skipping:", plot)
+            continue
+
         print(f"\n🌱 Processing plot: {plot_name}")
 
-        # ---------------- Get plot_id from Supabase ----------------
+        # ---------------- Supabase plot_id ----------------
         db_plot = (
             supabase
             .table("plots")
@@ -90,17 +106,17 @@ def run():
         # ---------------- GEE ANALYSIS ----------------
         try:
             result = run_growth_analysis_by_plot(
-                plot_data=plot_data,   # ✅ geometry comes from API
+                plot_data=plot,
                 start_date="2025-01-01",
                 end_date=str(date.today())
             )
         except Exception as e:
-            print("❌ GEE failed:", e)
+            print("❌ GEE failed for", plot_name, ":", e)
             continue
 
         analysis_date = result["analysis_date"]
 
-        # ---------------- SKIP IF ALREADY EXISTS ----------------
+        # ---------------- SKIP IF EXISTS ----------------
         cached = (
             supabase
             .table("analysis_results")
@@ -112,24 +128,19 @@ def run():
         )
 
         if cached.data:
-            print("⏭ Already cached for", analysis_date)
+            print("⏭ Already cached:", plot_name, analysis_date)
             continue
 
-        # ---------------- SATELLITE IMAGE ROW ----------------
-        sat = (
-            supabase
-            .table("satellite_images")
-            .insert({
-                "plot_id": plot_id,
-                "satellite": result["sensor"],
-                "satellite_date": analysis_date
-            })
-            .execute()
-        )
+        # ---------------- SATELLITE IMAGE ----------------
+        sat = supabase.table("satellite_images").insert({
+            "plot_id": plot_id,
+            "satellite": result["sensor"],
+            "satellite_date": analysis_date
+        }).execute()
 
         sat_id = sat.data[0]["id"]
 
-        # ---------------- STORE ANALYSIS ----------------
+        # ---------------- STORE RESULT ----------------
         supabase.table("analysis_results").insert({
             "plot_id": plot_id,
             "satellite_image_id": sat_id,
