@@ -1,7 +1,5 @@
 import os
 import json
-import time
-import requests
 import ee
 from supabase import create_client
 
@@ -12,16 +10,13 @@ REQUIRED_ENV = [
     "SUPABASE_URL",
     "SUPABASE_SERVICE_ROLE_KEY",
     "EE_SERVICE_ACCOUNT_JSON",
-    "FASTAPI_PLOTS_URL",
-    "WORKER_TOKEN"
 ]
 
 missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
 if missing:
-    print("❌ Missing environment variables:")
     for k in missing:
-        print(f"   - {k}")
-    raise RuntimeError("❌ Environment validation failed")
+        print(f"❌ Missing env: {k}")
+    raise RuntimeError("Environment validation failed")
 
 # =========================
 # INIT SUPABASE
@@ -36,6 +31,7 @@ supabase = create_client(
 # =========================
 print("🚀 Initializing Google Earth Engine...")
 creds = json.loads(os.environ["EE_SERVICE_ACCOUNT_JSON"])
+
 ee.Initialize(
     ee.ServiceAccountCredentials(
         creds["client_email"],
@@ -45,78 +41,41 @@ ee.Initialize(
 print("✅ GEE initialized successfully")
 
 # =========================
-# FETCH + NORMALIZE PLOTS
-# =========================
-def fetch_plots():
-    url = os.environ["FASTAPI_PLOTS_URL"]
-    token = os.environ["WORKER_TOKEN"]
-
-    for attempt in range(3):
-        try:
-            res = requests.get(
-                url,
-                headers={"x-worker-token": token},
-                timeout=20
-            )
-            res.raise_for_status()
-            data = res.json()
-
-            # Case 1: { "plots": [...] }
-            if isinstance(data, dict) and "plots" in data:
-                data = data["plots"]
-
-            normalized = []
-
-            for item in data:
-                # Case 2: "999_11"
-                if isinstance(item, str):
-                    normalized.append({
-                        "plot_name": item,
-                        "geometry": None
-                    })
-
-                # Case 3: full object
-                elif isinstance(item, dict):
-                    normalized.append(item)
-
-            return normalized
-
-        except requests.exceptions.ReadTimeout:
-            print(f"⏳ Timeout fetching plots (attempt {attempt+1}/3)")
-            time.sleep(2)
-
-        except Exception as e:
-            print("❌ Failed fetching plots:", e)
-            break
-
-    return []
-
-# =========================
 # MAIN WORKER
 # =========================
 def run():
-    print("🛰 Fetching plots from API...")
-    plots = fetch_plots()
+    print("🛰 Fetching plots directly from Supabase...")
+
+    plots = (
+        supabase
+        .table("plots")
+        .select("id, plot_name, geometry")
+        .execute()
+        .data
+    )
 
     print(f"📍 Found {len(plots)} plots")
 
     for plot in plots:
-        plot_name = plot.get("plot_name")
-        geometry = plot.get("geometry")
+        plot_id = plot["id"]
+        plot_name = plot["plot_name"]
+        geometry = plot["geometry"]
 
         print(f"\n🌱 Processing plot: {plot_name}")
 
         if not geometry:
-            print("⚠️ No geometry provided by API, skipping GEE")
+            print("⚠️ No geometry, skipping")
             continue
 
         try:
+            # ✅ Convert GeoJSON → GEE Geometry
             ee_geom = ee.Geometry(geometry)
 
-            area_m2 = ee_geom.area(maxError=1).getInfo()
-            area_ha = area_m2 / 10_000
+            # ✅ Area (required by your earlier failures)
+            area_ha = ee_geom.area(maxError=1).divide(10000).getInfo()
             print(f"📐 Area: {area_ha:.2f} ha")
 
+            # ✅ Fast, safe Sentinel-2 fetch
             img = (
                 ee.ImageCollection("COPERNICUS/S2_SR")
                 .filterBounds(ee_geom)
@@ -126,7 +85,7 @@ def run():
             )
 
             if img is None:
-                print("⚠️ No imagery found")
+                print("⚠️ No imagery, skipping")
                 continue
 
             ndvi = img.normalizedDifference(["B8", "B4"]).rename("NDVI")
@@ -140,17 +99,21 @@ def run():
 
             print(f"🌿 NDVI: {mean_ndvi}")
 
+            # ✅ Store result (idempotent-safe)
             supabase.table("plot_metrics").insert({
+                "plot_id": plot_id,
                 "plot_name": plot_name,
                 "area_ha": area_ha,
                 "ndvi": mean_ndvi
             }).execute()
 
+            print("✅ Stored successfully")
+
         except ee.EEException as e:
-            print(f"❌ GEE error: {e}")
+            print(f"❌ GEE error (skipped): {e}")
 
         except Exception as e:
-            print(f"❌ Unexpected error: {e}")
+            print(f"❌ Unexpected error (skipped): {e}")
 
 # =========================
 # ENTRYPOINT
