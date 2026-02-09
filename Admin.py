@@ -816,238 +816,131 @@ def get_cached_analysis(plot_id: str, analysis_type: str, analysis_date: str):
 
     return None
     
-import requests
-
 def trigger_daily_growth_cron():
     """
-    Triggers one batch of the daily growth cron.
-    Safe to run multiple times.
+    Triggers ONE batch of growth analysis.
+    Safe to call multiple times.
     """
     try:
         url = "https://cropeye-api.onrender.com/internal/run-daily-cron"
-        params = {
-            "dry_run": False,
-            "force": False
-        }
-
-        r = requests.get(url, params=params, timeout=60)
-        print("[CRON] Daily growth batch:", r.status_code, r.text)
-
+        params = {"dry_run": False, "force": False}
+        r = requests.post(url, params=params, timeout=90)
+        print("[CRON] Growth batch:", r.status_code, r.text)
     except Exception as e:
         print("[CRON][ERROR]", str(e))
-        
-from apscheduler.triggers.cron import CronTrigger
 
-scheduler.add_job(
-    trigger_daily_growth_cron,
-    CronTrigger(hour=0, minute=0),  # daily at 00:00 UTC
-    id="daily_growth_cron",
-    replace_existing=True,
-    max_instances=1,
-    coalesce=True
-)
 
 @app.on_event("startup")
 async def start_crons():
     scheduler.add_job(
         trigger_daily_growth_cron,
-        CronTrigger(hour=0, minute=0),  # daily midnight
-        id="daily_growth_trigger",
-        replace_existing=True
+        CronTrigger(hour=0, minute=0),  # daily midnight UTC
+        id="daily_growth_cron",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
     )
-
     scheduler.start()
-
-
-def store_analysis_result(
-    plot_id,
-    analysis_type,
-    analysis_date,
-    sensor,
-    tile_url,
-    response_json
-):
-    supabase.table("analysis_results").insert({
-        "plot_id": plot_id,
-        "analysis_type": analysis_type,
-        "analysis_date": analysis_date,
-        "sensor_used": sensor,
-        "tile_url": tile_url,
-        "response_json": response_json
-    }).execute()
-    
-
 @app.post("/internal/run-daily-cron")
 async def run_daily_cron(
     dry_run: bool = Query(False),
     force: bool = Query(False),
 ):
-    """
-    Daily cron runner (SAFE, BATCHED).
-
-    - Processes plots in small batches (Render-safe)
-    - Can be called multiple times per day
-    - Uses UPSERT to avoid duplicate analysis errors
-    """
-
-    # ===============================
-    # CONFIG (OPTION A – FASTEST)
-    # ===============================
     MAX_PLOTS_PER_RUN = 10
 
     today = date.today().isoformat()
-    analysis_date = today
     start_date = (date.today() - timedelta(days=30)).isoformat()
     end_date = today
 
-    counters = {
-        "total_plots": 0,
-        "processed": 0,
-        "skipped": 0,
-        "errors": 0,
-    }
+    counters = {"total_plots": 0, "processed": 0, "skipped": 0, "errors": 0}
+    logs = {"processed": [], "skipped": [], "errors": []}
 
-    logs = {
-        "processed": [],
-        "skipped": [],
-        "errors": [],
-    }
+    plot_service = PlotSyncService()
+    plots = plot_service.get_plots_dict(force_refresh=True)
+    counters["total_plots"] = len(plots)
 
-    try:
-        # --------------------------------
-        # 1. Fetch plots from Django
-        # --------------------------------
-        plot_service = PlotSyncService()
-        plots = plot_service.get_plots_dict(force_refresh=True)
+    for i, (plot_name, plot_data) in enumerate(plots.items()):
+        if i >= MAX_PLOTS_PER_RUN:
+            break
 
-        counters["total_plots"] = len(plots)
+        try:
+            # ---------------- Validate plot ----------------
+            props = plot_data.get("properties") or {}
+            django_id = props.get("django_id")
+            if not django_id:
+                logs["skipped"].append({"plot": plot_name, "reason": "missing django_id"})
+                counters["skipped"] += 1
+                continue
 
-        # --------------------------------
-        # 2. Process plots in BATCHES
-        # --------------------------------
-        for i, (plot_name, plot_data) in enumerate(plots.items()):
-            if i >= MAX_PLOTS_PER_RUN:
-                break
+            plot_row = (
+                supabase.table("plots")
+                .select("id")
+                .eq("django_plot_id", django_id)
+                .single()
+                .execute()
+            )
+            plot_id = plot_row.data["id"]
 
-            try:
-                # ----------------------------
-                # Validate plot data
-                # ----------------------------
-                if not plot_data or "geometry" not in plot_data:
-                    counters["skipped"] += 1
-                    logs["skipped"].append({
-                        "plot": plot_name,
-                        "reason": "missing geometry"
-                    })
-                    continue
+            # ---------------- Get latest satellite image ----------------
+            sat_row = (
+                supabase.table("satellite_images")
+                .select("id,satellite,satellite_date")
+                .eq("plot_id", plot_id)
+                .order("satellite_date", desc=True)
+                .limit(1)
+                .execute()
+            )
 
-                properties = plot_data.get("properties") or {}
-                django_id = properties.get("django_id")
+            if not sat_row.data:
+                logs["skipped"].append({"plot": plot_name, "reason": "no satellite image"})
+                counters["skipped"] += 1
+                continue
 
-                if not django_id:
-                    counters["skipped"] += 1
-                    logs["skipped"].append({
-                        "plot": plot_name,
-                        "reason": "missing django_id"
-                    })
-                    continue
+            satellite_image = sat_row.data[0]
 
-                # ----------------------------
-                # 3. Find plot in Supabase
-                # ----------------------------
-                plot_row = (
-                    supabase.table("plots")
-                    .select("id")
-                    .eq("django_plot_id", django_id)
-                    .execute()
-                )
+            # ---------------- Run growth analysis ----------------
+            result = run_growth_analysis_by_plot(
+                plot_data=plot_data,
+                start_date=start_date,
+                end_date=end_date
+            )
 
-                if not plot_row.data:
-                    counters["skipped"] += 1
-                    logs["skipped"].append({
-                        "plot": plot_name,
-                        "reason": "no matching supabase plot"
-                    })
-                    continue
-
-                plot_id = plot_row.data[0]["id"]
-
-                # ----------------------------
-                # 4. Run GEE Growth Analysis
-                # ----------------------------
-                result = run_growth_analysis_by_plot(
-                    plot_data=plot_data,
-                    start_date=start_date,
-                    end_date=end_date
-                )
-
-                if dry_run:
-                    counters["processed"] += 1
-                    logs["processed"].append({
-                        "plot": plot_name,
-                        "mode": "dry_run"
-                    })
-                    continue
-
-                # ----------------------------
-                # 5. UPSERT analysis result
-                # ----------------------------
-                supabase.table("analysis_results").upsert(
-                    {
-                        "plot_id": plot_id,
-                        "analysis_type": "growth",
-                        "analysis_date": analysis_date,
-                        "sensor": result["sensor"],
-                        "tile_url": result["tile_url"],
-                        "response_json": result["response_json"],
-                    },
-                    on_conflict="plot_id,analysis_type,analysis_date"
-                ).execute()
-
+            if dry_run:
                 counters["processed"] += 1
-                logs["processed"].append({
-                    "plot": plot_name,
-                    "sensor": result["sensor"],
-                    "date": result["analysis_date"]
-                })
+                logs["processed"].append({"plot": plot_name, "mode": "dry_run"})
+                continue
 
-            except Exception as plot_err:
-                counters["errors"] += 1
-                logs["errors"].append({
-                    "plot": plot_name,
-                    "error": str(plot_err)
-                })
+            # ---------------- UPSERT analysis result ----------------
+            supabase.table("analysis_results").upsert(
+                {
+                    "plot_id": plot_id,
+                    "satellite_image_id": satellite_image["id"],
+                    "analysis_date": today,
+                    "sensor_used": satellite_image["satellite"],
+                    "tile_url": result["tile_url"],
+                    "response_json": result["response_json"],
+                },
+                on_conflict="plot_id,satellite_image_id,analysis_date"
+            ).execute()
 
-        # --------------------------------
-        # 6. Return FAST response
-        # --------------------------------
-        return {
-            "status": "done",
-            "date": today,
-            "mode": {
-                "dry_run": dry_run,
-                "force": force
-            },
-            "counters": counters,
-            "details": logs
-        }
+            counters["processed"] += 1
+            logs["processed"].append({
+                "plot": plot_name,
+                "satellite": satellite_image["satellite"],
+                "date": today
+            })
 
-    except Exception as e:
-        return {
-            "status": "failed",
-            "date": today,
-            "error": str(e),
-            "trace": traceback.format_exc()
-        }
+        except Exception as e:
+            counters["errors"] += 1
+            logs["errors"].append({"plot": plot_name, "error": str(e)})
 
-def get_plot_id(plot_name: str) -> str:
-    res = supabase.table("plots") \
-        .select("id") \
-        .eq("plot_name", plot_name) \
-        .limit(1) \
-        .execute()
-
-    return res.data[0]["id"]
+    return {
+        "status": "done",
+        "date": today,
+        "mode": {"dry_run": dry_run, "force": force},
+        "counters": counters,
+        "details": logs
+    }
 
 @app.post("/analyze_Growth")
 async def analyze_growth(
