@@ -845,38 +845,35 @@ def run_daily_cron(
         "errors": [],
     }
 
-    # -----------------------------
-    # DATE RANGE (last 30 days)
-    # -----------------------------
     end_date = date.today()
     start_date = end_date - timedelta(days=30)
 
     try:
         # -----------------------------
-        # PHASE 0: SYNC DJANGO IDs (NO INSERTS)
-plot_service = PlotSyncService()
-plots = plot_service.get_plots_dict(force_refresh=True)
+        # PHASE 0: SYNC DJANGO IDs ONLY
+        # -----------------------------
+        plot_service = PlotSyncService()
+        plots = plot_service.get_plots_dict(force_refresh=True)
 
-counters["total_plots"] = len(plots)
+        counters["total_plots"] = len(plots)
 
-for plot_name, plot_data in plots.items():
-    django_id = plot_data.get("properties", {}).get("django_id")
+        for plot_name, plot_data in plots.items():
+            django_id = plot_data.get("properties", {}).get("django_id")
+            if not django_id:
+                continue
 
-    if not django_id:
-        continue
+            existing = supabase.table("plots") \
+                .select("id") \
+                .eq("plot_name", plot_name) \
+                .execute()
 
-    existing = supabase.table("plots") \
-        .select("id") \
-        .eq("plot_name", plot_name) \
-        .execute()
-
-    if existing.data:
-        supabase.table("plots").update(
-            {"django_plot_id": django_id}
-        ).eq("id", existing.data[0]["id"]).execute()
+            if existing.data:
+                supabase.table("plots").update(
+                    {"django_plot_id": django_id}
+                ).eq("id", existing.data[0]["id"]).execute()
 
         # -----------------------------
-        # PHASE 1: PROCESS EACH PLOT
+        # PHASE 1: RUN ANALYSIS
         # -----------------------------
         for plot_name, plot_data in plots.items():
             try:
@@ -891,7 +888,6 @@ for plot_name, plot_data in plots.items():
                     })
                     continue
 
-                # find Supabase plot
                 plot_row = supabase.table("plots") \
                     .select("id") \
                     .eq("django_plot_id", django_id) \
@@ -915,9 +911,6 @@ for plot_name, plot_data in plots.items():
                     })
                     continue
 
-                # -----------------------------
-                # GROWTH ANALYSIS (GEE)
-                # -----------------------------
                 result = run_growth_analysis_by_plot(
                     plot_data=plot_data,
                     start_date=start_date.isoformat(),
@@ -930,7 +923,7 @@ for plot_name, plot_data in plots.items():
                     "analysis_date": result["analysis_date"],
                     "sensor": result["sensor"],
                     "tile_url": result["tile_url"],
-                    "result": result["response_json"]
+                    "response_json": result["response_json"]
                 }).execute()
 
                 counters["processed"] += 1
@@ -966,7 +959,6 @@ for plot_name, plot_data in plots.items():
             "trace": traceback.format_exc()
         }
 
-    
 def get_plot_id(plot_name: str) -> str:
     res = supabase.table("plots") \
         .select("id") \
