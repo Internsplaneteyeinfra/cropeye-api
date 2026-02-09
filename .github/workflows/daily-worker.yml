@@ -12,5 +12,5 @@ jobs:
     steps:
       - name: Call FastAPI cron endpoint
         run: |
-          curl -X POST "${{ secrets.FASTAPI_URL }}/internal/run-daily-cron" \
+          curl -X POST "${{ secrets.FASTAPI_PLOTS_URL }}/internal/run-daily-cron" \
           -H "X-Worker-Token: ${{ secrets.WORKER_TOKEN }}"
