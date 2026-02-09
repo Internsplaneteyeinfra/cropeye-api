@@ -940,14 +940,17 @@ async def run_daily_cron(
                 # ----------------------------
                 # 5. Save analysis result
                 # ----------------------------
-                supabase.table("analysis_results").insert({
-                    "plot_id": plot_id,
-                    "analysis_type": "growth",
-                    "analysis_date": result["analysis_date"],
-                    "sensor_used": result["sensor"],
-                    "tile_url": result["tile_url"],
-                    "response_json": result["response_json"],
-                }).execute()
+               supabase.table("analysis").upsert(
+                    {
+                        "plot_id": plot_id,
+                        "analysis_type": "growth",
+                        "analysis_date": analysis_date,
+                        "sensor": result["sensor"],
+                        "tile_url": result["tile_url"],
+                        "response_json": result["response_json"],
+                    },
+                    on_conflict="plot_id,analysis_type,analysis_date"
+            ).execute()
 
                 counters["processed"] += 1
                 logs["processed"].append({
