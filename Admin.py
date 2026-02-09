@@ -816,21 +816,36 @@ def get_cached_analysis(plot_id: str, analysis_type: str, analysis_date: str):
 
     return None
     
-async def trigger_daily_growth_cron():
-    """
-    SAFE cron trigger.
-    Calls the internal endpoint instead of doing work here.
-    """
-    url = f"{settings.INTERNAL_BASE_URL}/internal/run-daily-cron"
+import requests
 
+def trigger_daily_growth_cron():
+    """
+    Triggers one batch of the daily growth cron.
+    Safe to run multiple times.
+    """
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(url)
+        url = "https://cropeye-api.onrender.com/internal/run-daily-cron"
+        params = {
+            "dry_run": False,
+            "force": False
+        }
 
-        print("[CRON] Growth cron triggered:", resp.status_code)
+        r = requests.get(url, params=params, timeout=60)
+        print("[CRON] Daily growth batch:", r.status_code, r.text)
 
     except Exception as e:
-        print("[CRON] Failed to trigger growth cron:", str(e))
+        print("[CRON][ERROR]", str(e))
+        
+from apscheduler.triggers.cron import CronTrigger
+
+scheduler.add_job(
+    trigger_daily_growth_cron,
+    CronTrigger(hour=0, minute=0),  # daily at 00:00 UTC
+    id="daily_growth_cron",
+    replace_existing=True,
+    max_instances=1,
+    coalesce=True
+)
 
 @app.on_event("startup")
 async def start_crons():
