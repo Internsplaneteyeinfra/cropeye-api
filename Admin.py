@@ -824,6 +824,57 @@ def store_analysis_result(
         "tile_url": tile_url,
         "response_json": response_json
     }).execute()
+@app.post("/internal/run-daily-cron")
+def run_daily_cron(x_worker_token: str = Header(None)):
+    verify_worker(x_worker_token)
+
+    results = {
+        "growth": 0,
+        "water": 0,
+        "soil": 0,
+        "pest": 0,
+        "errors": 0
+    }
+
+    today = date.today().strftime("%Y-%m-%d")
+
+    for plot_name, plot_data in plot_dict.items():
+        try:
+            # ---- GROWTH ----
+            growth_json, tile_url, sensor, image_date = run_growth_analysis_by_plot_name(plot_name)
+
+            store_analysis_result(
+                plot_id=get_plot_id(plot_name),
+                analysis_type="growth",
+                analysis_date=image_date,
+                sensor=sensor,
+                tile_url=tile_url,
+                response_json=growth_json
+            )
+            results["growth"] += 1
+
+            # ---- REPEAT for other APIs later ----
+            # water
+            # soil
+            # pest
+
+        except Exception as e:
+            print(f"❌ {plot_name}: {e}")
+            results["errors"] += 1
+
+    return {
+        "status": "done",
+        "date": today,
+        "summary": results
+    }
+def get_plot_id(plot_name: str) -> str:
+    res = supabase.table("plots") \
+        .select("id") \
+        .eq("plot_name", plot_name) \
+        .limit(1) \
+        .execute()
+
+    return res.data[0]["id"]
 
 @app.post("/analyze_Growth")
 async def analyze_growth(
