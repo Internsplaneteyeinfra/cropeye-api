@@ -826,6 +826,7 @@ def store_analysis_result(
         "response_json": response_json
     }).execute()
     
+
 @app.post("/internal/run-daily-cron")
 async def run_daily_cron(
     dry_run: bool = Query(False),
@@ -834,17 +835,18 @@ async def run_daily_cron(
     """
     Daily cron runner (SAFE, BATCHED).
 
-    - Processes only a few plots per run (Render-safe)
-    - Can be called multiple times
-    - dry_run=true → no DB writes
+    - Processes plots in small batches (Render-safe)
+    - Can be called multiple times per day
+    - Uses UPSERT to avoid duplicate analysis errors
     """
 
     # ===============================
-    # CONFIG (OPTION A)
+    # CONFIG (OPTION A – FASTEST)
     # ===============================
     MAX_PLOTS_PER_RUN = 3
 
     today = date.today().isoformat()
+    analysis_date = today
     start_date = (date.today() - timedelta(days=30)).isoformat()
     end_date = today
 
@@ -871,7 +873,7 @@ async def run_daily_cron(
         counters["total_plots"] = len(plots)
 
         # --------------------------------
-        # 2. Process in BATCHES
+        # 2. Process plots in BATCHES
         # --------------------------------
         for i, (plot_name, plot_data) in enumerate(plots.items()):
             if i >= MAX_PLOTS_PER_RUN:
@@ -938,9 +940,9 @@ async def run_daily_cron(
                     continue
 
                 # ----------------------------
-                # 5. Save analysis result
+                # 5. UPSERT analysis result
                 # ----------------------------
-               supabase.table("analysis").upsert(
+                supabase.table("analysis").upsert(
                     {
                         "plot_id": plot_id,
                         "analysis_type": "growth",
@@ -950,7 +952,7 @@ async def run_daily_cron(
                         "response_json": result["response_json"],
                     },
                     on_conflict="plot_id,analysis_type,analysis_date"
-            ).execute()
+                ).execute()
 
                 counters["processed"] += 1
                 logs["processed"].append({
