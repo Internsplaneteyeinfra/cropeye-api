@@ -3,6 +3,13 @@ from datetime import datetime, timedelta, date
 import json
 import os
 
+# ======================================================
+# Earth Engine Initialization (SAFE)
+# ======================================================
+
+if "EE_SERVICE_ACCOUNT_JSON" not in os.environ:
+    raise RuntimeError("EE_SERVICE_ACCOUNT_JSON env variable not set")
+
 service_account_info = json.loads(os.environ["EE_SERVICE_ACCOUNT_JSON"])
 
 credentials = ee.ServiceAccountCredentials(
@@ -11,9 +18,37 @@ credentials = ee.ServiceAccountCredentials(
 )
 
 ee.Initialize(credentials, project=service_account_info["project_id"])
-    
+
+# ======================================================
+# Growth Analysis (USED BY API + CRON)
+# ======================================================
+
 def run_growth_analysis_by_plot(plot_data, start_date, end_date):
+    """
+    Runs crop growth analysis for a single plot.
+
+    REQUIRED plot_data format:
+    {
+        "geometry": ee.Geometry,
+        "properties": {...}
+    }
+
+    Returns:
+    {
+        analysis_date,
+        sensor,
+        tile_url,
+        response_json
+    }
+    """
+
+    # -------------------- SAFETY CHECK --------------------
+    if not plot_data or "geometry" not in plot_data:
+        raise ValueError("plot_data missing geometry")
+
     geometry = plot_data["geometry"]
+
+    # -------------------- AREA --------------------
     area_hectares = geometry.area().divide(10000).getInfo()
 
     analysis_start = ee.Date(start_date)
@@ -51,35 +86,26 @@ def run_growth_analysis_by_plot(plot_data, start_date, end_date):
 
     s1_count = s1_collection.size().getInfo()
     latest_s1_image = None
-    previous_s1_image = None
     latest_s1_date = None
 
-    if s1_count >= 2:
-        latest_s1_image = ee.Image(s1_collection.toList(2).get(0))
-        previous_s1_image = ee.Image(s1_collection.toList(2).get(1))
-        latest_s1_date = ee.Date(latest_s1_image.get("system:time_start"))
-    elif s1_count == 1:
+    if s1_count >= 1:
         latest_s1_image = ee.Image(s1_collection.first())
         latest_s1_date = ee.Date(latest_s1_image.get("system:time_start"))
 
     # -------------------- DECISION LOGIC --------------------
-    use_s2 = False
-    use_s1 = False
-
     if latest_s2_date and latest_s1_date:
         use_s2 = latest_s2_date.millis().getInfo() >= latest_s1_date.millis().getInfo()
-        use_s1 = not use_s2
     elif latest_s2_date:
         use_s2 = True
     elif latest_s1_date:
-        use_s1 = True
+        use_s2 = False
     else:
         raise Exception("No Sentinel-1 or Sentinel-2 images found")
 
     # -------------------- ANALYSIS --------------------
     if use_s2:
-        analysis = latest_s2_image.normalizedDifference(["B8", "B4"]).rename("NDVI").clip(geometry)
-        ndvi = analysis.select("NDVI")
+        analysis = latest_s2_image.normalizedDifference(["B8", "B4"]).rename("NDVI")
+        ndvi = analysis.clip(geometry)
 
         weak_mask = ndvi.gte(0.2).And(ndvi.lt(0.4))
         stress_mask = ndvi.gte(0.0).And(ndvi.lt(0.2))
@@ -91,8 +117,7 @@ def run_growth_analysis_by_plot(plot_data, start_date, end_date):
         sensor = "Sentinel-2"
 
     else:
-        analysis = latest_s1_image.select("VH").clip(geometry)
-        vh = analysis.select("VH")
+        vh = latest_s1_image.select("VH").clip(geometry)
 
         weak_mask = vh.gte(-11)
         stress_mask = vh.lt(-11).And(vh.gt(-13))
@@ -121,17 +146,28 @@ def run_growth_analysis_by_plot(plot_data, start_date, end_date):
         "palette": ["#bc1e29", "#58cf54", "#28ae31", "#056c3e"]
     }
 
-    tile_url = combined_smooth.visualize(**vis_params) \
-        .clip(geometry) \
-        .getMapId()["tile_fetcher"].url_format
+    tile_url = (
+        combined_smooth
+        .visualize(**vis_params)
+        .getMapId()["tile_fetcher"]
+        .url_format
+    )
 
     # -------------------- PIXEL COUNTS --------------------
     count_image = ee.Image.constant(1)
 
     def get_pixel_count(mask):
-        return count_image.updateMask(mask).reduceRegion(
-            ee.Reducer.count(), geometry, 10, bestEffort=True
-        ).get("constant")
+        return (
+            count_image
+            .updateMask(mask)
+            .reduceRegion(
+                ee.Reducer.count(),
+                geometry,
+                10,
+                bestEffort=True
+            )
+            .get("constant")
+        )
 
     healthy_count = get_pixel_count(healthy_mask).getInfo() or 0
     moderate_count = get_pixel_count(moderate_mask).getInfo() or 0
@@ -139,7 +175,7 @@ def run_growth_analysis_by_plot(plot_data, start_date, end_date):
     stress_count = get_pixel_count(stress_mask).getInfo() or 0
     total_pixel_count = get_pixel_count(count_image).getInfo() or 0
 
-    # -------------------- RESPONSE JSON --------------------
+    # -------------------- RESPONSE --------------------
     response_json = {
         "area_hectares": round(area_hectares, 2),
         "image_date": latest_image_date,
