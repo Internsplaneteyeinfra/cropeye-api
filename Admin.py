@@ -825,12 +825,27 @@ def store_analysis_result(
         "response_json": response_json
     }).execute()
     
-@app.post("/internal/run-daily-cron")
-def run_daily_cron(
+@router.post("/internal/run-daily-cron")
+async def run_daily_cron(
     dry_run: bool = Query(False),
     force: bool = Query(False),
 ):
+    """
+    Daily cron runner (SAFE, BATCHED).
+
+    - Processes only a few plots per run (Render-safe)
+    - Can be called multiple times
+    - dry_run=true → no DB writes
+    """
+
+    # ===============================
+    # CONFIG (OPTION A)
+    # ===============================
+    MAX_PLOTS_PER_RUN = 3
+
     today = date.today().isoformat()
+    start_date = (date.today() - timedelta(days=30)).isoformat()
+    end_date = today
 
     counters = {
         "total_plots": 0,
@@ -845,53 +860,54 @@ def run_daily_cron(
         "errors": [],
     }
 
-    end_date = date.today()
-    start_date = end_date - timedelta(days=30)
-
     try:
-        # -----------------------------
-        # PHASE 0: SYNC DJANGO IDs ONLY
-        # -----------------------------
+        # --------------------------------
+        # 1. Fetch plots from Django
+        # --------------------------------
         plot_service = PlotSyncService()
         plots = plot_service.get_plots_dict(force_refresh=True)
 
         counters["total_plots"] = len(plots)
 
-        for plot_name, plot_data in plots.items():
-            django_id = plot_data.get("properties", {}).get("django_id")
-            if not django_id:
-                continue
+        # --------------------------------
+        # 2. Process in BATCHES
+        # --------------------------------
+        for i, (plot_name, plot_data) in enumerate(plots.items()):
+            if i >= MAX_PLOTS_PER_RUN:
+                break
 
-            existing = supabase.table("plots") \
-                .select("id") \
-                .eq("plot_name", plot_name) \
-                .execute()
-
-            if existing.data:
-                supabase.table("plots").update(
-                    {"django_plot_id": django_id}
-                ).eq("id", existing.data[0]["id"]).execute()
-
-        # -----------------------------
-        # PHASE 1: RUN ANALYSIS
-        # -----------------------------
-        for plot_name, plot_data in plots.items():
             try:
-                geometry = plot_data.get("geometry")
-                django_id = plot_data.get("properties", {}).get("django_id")
-
-                if not geometry or not django_id:
+                # ----------------------------
+                # Validate plot data
+                # ----------------------------
+                if not plot_data or "geometry" not in plot_data:
                     counters["skipped"] += 1
                     logs["skipped"].append({
                         "plot": plot_name,
-                        "reason": "missing geometry or django_id"
+                        "reason": "missing geometry"
                     })
                     continue
 
-                plot_row = supabase.table("plots") \
-                    .select("id") \
-                    .eq("django_plot_id", django_id) \
+                properties = plot_data.get("properties") or {}
+                django_id = properties.get("django_id")
+
+                if not django_id:
+                    counters["skipped"] += 1
+                    logs["skipped"].append({
+                        "plot": plot_name,
+                        "reason": "missing django_id"
+                    })
+                    continue
+
+                # ----------------------------
+                # 3. Find plot in Supabase
+                # ----------------------------
+                plot_row = (
+                    supabase.table("plots")
+                    .select("id")
+                    .eq("django_plot_id", django_id)
                     .execute()
+                )
 
                 if not plot_row.data:
                     counters["skipped"] += 1
@@ -903,6 +919,15 @@ def run_daily_cron(
 
                 plot_id = plot_row.data[0]["id"]
 
+                # ----------------------------
+                # 4. Run GEE Growth Analysis
+                # ----------------------------
+                result = run_growth_analysis_by_plot(
+                    plot_data=plot_data,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+
                 if dry_run:
                     counters["processed"] += 1
                     logs["processed"].append({
@@ -911,35 +936,35 @@ def run_daily_cron(
                     })
                     continue
 
-                result = run_growth_analysis_by_plot(
-                    plot_data=plot_data,
-                    start_date=start_date.isoformat(),
-                    end_date=end_date.isoformat(),
-                )
-
+                # ----------------------------
+                # 5. Save analysis result
+                # ----------------------------
                 supabase.table("analysis_results").insert({
                     "plot_id": plot_id,
                     "analysis_type": "growth",
                     "analysis_date": result["analysis_date"],
-                    "sensor": result["sensor"],
+                    "sensor_used": result["sensor"],
                     "tile_url": result["tile_url"],
-                    "response_json": result["response_json"]
+                    "response_json": result["response_json"],
                 }).execute()
 
                 counters["processed"] += 1
                 logs["processed"].append({
                     "plot": plot_name,
-                    "sensor": result["sensor"]
+                    "sensor": result["sensor"],
+                    "date": result["analysis_date"]
                 })
 
-            except Exception as e:
+            except Exception as plot_err:
                 counters["errors"] += 1
                 logs["errors"].append({
                     "plot": plot_name,
-                    "error": str(e),
-                    "trace": traceback.format_exc()
+                    "error": str(plot_err)
                 })
 
+        # --------------------------------
+        # 6. Return FAST response
+        # --------------------------------
         return {
             "status": "done",
             "date": today,
