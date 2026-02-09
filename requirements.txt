@@ -11,3 +11,4 @@ plotly
 requests
 python-dotenv
 python-multipart
+apscheduler
