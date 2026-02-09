@@ -825,12 +825,6 @@ def store_analysis_result(
         "response_json": response_json
     }).execute()
     
-from fastapi import APIRouter, Query
-from datetime import date, timedelta
-import traceback
-
-router = APIRouter()
-
 @app.post("/internal/run-daily-cron")
 def run_daily_cron(
     dry_run: bool = Query(False),
@@ -859,32 +853,27 @@ def run_daily_cron(
 
     try:
         # -----------------------------
-        # PHASE 0: SYNC DJANGO → SUPABASE
-        # -----------------------------
-        plot_service = PlotSyncService()
-        plots = plot_service.get_plots_dict(force_refresh=True)
+        # PHASE 0: SYNC DJANGO IDs (NO INSERTS)
+plot_service = PlotSyncService()
+plots = plot_service.get_plots_dict(force_refresh=True)
 
-        counters["total_plots"] = len(plots)
+counters["total_plots"] = len(plots)
 
-        for plot_name, plot_data in plots.items():
-            django_id = plot_data.get("properties", {}).get("django_id")
+for plot_name, plot_data in plots.items():
+    django_id = plot_data.get("properties", {}).get("django_id")
 
-            if not django_id:
-                counters["skipped"] += 1
-                logs["skipped"].append({
-                    "plot": plot_name,
-                    "reason": "missing django_id"
-                })
-                continue
+    if not django_id:
+        continue
 
-            # ensure plot exists in Supabase
-            supabase.table("plots").upsert(
-                {
-                    "django_plot_id": django_id,
-                    "plot_name": plot_name
-                },
-                on_conflict="django_plot_id"
-            ).execute()
+    existing = supabase.table("plots") \
+        .select("id") \
+        .eq("plot_name", plot_name) \
+        .execute()
+
+    if existing.data:
+        supabase.table("plots").update(
+            {"django_plot_id": django_id}
+        ).eq("id", existing.data[0]["id"]).execute()
 
         # -----------------------------
         # PHASE 1: PROCESS EACH PLOT
