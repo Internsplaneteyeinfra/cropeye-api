@@ -819,22 +819,28 @@ def get_cached_analysis(plot_id: str, analysis_type: str, analysis_date: str):
 def trigger_daily_growth_cron():
     try:
         url = "https://cropeye-api.onrender.com/internal/run-daily-cron"
-        r = requests.post(url, params={"dry_run": False, "force": False}, timeout=90)
+        r = requests.post(
+            url,
+            params={"dry_run": False, "force": False},
+            timeout=90
+        )
         print("[CRON] Growth batch:", r.status_code)
     except Exception as e:
         print("[CRON][ERROR]", str(e))
+
 
 @app.on_event("startup")
 async def start_crons():
     scheduler.add_job(
         trigger_daily_growth_cron,
-        CronTrigger(hour=0, minute=0),  # daily midnight UTC
+        CronTrigger(minute="*/5"),  # 🔥 every 5 minutes
         id="daily_growth_cron",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
     )
     scheduler.start()
+
 
 @app.post("/internal/run-daily-cron")
 async def run_daily_cron(
@@ -850,76 +856,96 @@ async def run_daily_cron(
     counters = {"total_plots": 0, "processed": 0, "skipped": 0, "errors": 0}
     logs = {"processed": [], "skipped": [], "errors": []}
 
+    # ---------------- LOAD OR INIT STATE ----------------
+    state = supabase.table("cron_state") \
+        .select("last_index") \
+        .eq("job_name", "daily_growth") \
+        .execute()
+
+    if state.data:
+        start_index = state.data[0]["last_index"]
+    else:
+        supabase.table("cron_state").insert({
+            "job_name": "daily_growth",
+            "last_index": 0
+        }).execute()
+        start_index = 0
+
+    end_index = start_index + MAX_PLOTS_PER_RUN
+
+    # ---------------- LOAD PLOTS ----------------
     plot_service = PlotSyncService()
-    plots = plot_service.get_plots_dict(force_refresh=True)
+    plots = list(plot_service.get_plots_dict(force_refresh=True).items())
     counters["total_plots"] = len(plots)
 
-    for i, (plot_name, plot_data) in enumerate(plots.items()):
-        if i >= MAX_PLOTS_PER_RUN:
-            break
+    # ---------------- PROCESS BATCH ----------------
+    for i in range(start_index, min(end_index, len(plots))):
+        plot_name, plot_data = plots[i]
 
         try:
-            # ---------------- Validate plot ----------------
             props = plot_data.get("properties") or {}
             django_id = props.get("django_id")
+
             if not django_id:
-                logs["skipped"].append({"plot": plot_name, "reason": "missing django_id"})
                 counters["skipped"] += 1
+                logs["skipped"].append({"plot": plot_name, "reason": "missing django_id"})
                 continue
 
-            plot_row = (
-                supabase.table("plots")
-                .select("id")
-                .eq("django_plot_id", django_id)
-                .single()
+            plot_row = supabase.table("plots") \
+                .select("id") \
+                .eq("django_plot_id", django_id) \
+                .single() \
                 .execute()
-            )
+
             plot_id = plot_row.data["id"]
 
-            # ---------------- Get latest satellite image ----------------
-            sat_row = (
-                supabase.table("satellite_images")
-                .select("id,satellite,satellite_date")
-                .eq("plot_id", plot_id)
-                .order("satellite_date", desc=True)
-                .limit(1)
+            sat_row = supabase.table("satellite_images") \
+                .select("id,satellite,satellite_date") \
+                .eq("plot_id", plot_id) \
+                .order("satellite_date", desc=True) \
+                .limit(1) \
                 .execute()
-            )
 
             if not sat_row.data:
-                logs["skipped"].append({"plot": plot_name, "reason": "no satellite image"})
                 counters["skipped"] += 1
+                logs["skipped"].append({"plot": plot_name, "reason": "no satellite image"})
                 continue
 
             satellite_image = sat_row.data[0]
 
-            # ---------------- Run growth analysis ----------------
+            # ---------- DUPLICATE SAFETY ----------
+            exists = supabase.table("analysis_results") \
+                .select("id") \
+                .eq("plot_id", plot_id) \
+                .eq("satellite_image_id", satellite_image["id"]) \
+                .eq("analysis_type", "growth") \
+                .limit(1) \
+                .execute()
+
+            if exists.data:
+                counters["skipped"] += 1
+                logs["skipped"].append({"plot": plot_name, "reason": "already analyzed"})
+                continue
+
             result = run_growth_analysis_by_plot(
                 plot_data=plot_data,
                 start_date=start_date,
                 end_date=end_date
             )
 
-            if dry_run:
-                counters["processed"] += 1
-                logs["processed"].append({"plot": plot_name, "mode": "dry_run"})
-                continue
-
-            # ---------------- UPSERT analysis result ----------------
-            supabase.table("analysis_results").upsert(
-                {
-                    "plot_id": plot_id,
-                    "satellite_image_id": satellite_image["id"],
-                    "analysis_type": "growth",
-                    "analysis_date": result["analysis_date"],  # 🔥 FIXED
-                    "sensor_used": result["sensor"],           # 🔥 FIXED
-                    "tile_url": result["tile_url"],
-                    "response_json": result["response_json"],
-                },
-                on_conflict="plot_id,satellite_image_id,analysis_date"
-            ).execute()
-
-
+            if not dry_run:
+                supabase.table("analysis_results").upsert(
+                    {
+                        "plot_id": plot_id,
+                        "satellite_image_id": satellite_image["id"],
+                        "analysis_type": "growth",
+                        "analysis_date": result["analysis_date"],
+                        "sensor_used": result["sensor"],
+                        "tile_url": result["tile_url"],
+                        "response_json": result["response_json"],
+                    },
+                    on_conflict="plot_id,satellite_image_id,analysis_type"
+                ).execute()
 
             counters["processed"] += 1
             logs["processed"].append({
@@ -932,6 +958,11 @@ async def run_daily_cron(
             counters["errors"] += 1
             logs["errors"].append({"plot": plot_name, "error": str(e)})
 
+    # ---------------- UPDATE STATE ----------------
+    supabase.table("cron_state").update(
+        {"last_index": end_index}
+    ).eq("job_name", "daily_growth").execute()
+
     return {
         "status": "done",
         "date": today,
@@ -939,6 +970,7 @@ async def run_daily_cron(
         "counters": counters,
         "details": logs
     }
+
 
 @app.post("/analyze_Growth")
 async def analyze_growth(
@@ -978,6 +1010,12 @@ async def analyze_growth(
             }
 
         row = res.data[0]
+        supabase.table("cron_state").update(
+    {
+        "last_index": end_index,
+        "updated_at": datetime.utcnow().isoformat()
+    }
+).eq("job_name", "daily_growth").execute()
 
         # 3. Return cached result
         return {
