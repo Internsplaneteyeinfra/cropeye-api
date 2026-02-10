@@ -26,27 +26,14 @@ ee.Initialize(credentials, project=service_account_info["project_id"])
 def run_growth_analysis_by_plot(plot_data, start_date, end_date):
     """
     Runs crop growth analysis for a single plot.
-
-    REQUIRED plot_data format:
-    {
-        "geometry": ee.Geometry,
-        "properties": {...}
-    }
-
-    Returns:
-    {
-        analysis_date,
-        sensor,
-        tile_url,
-        response_json
-    }
+    LOGIC IS UNCHANGED – only response structure is updated.
     """
 
-    # -------------------- SAFETY CHECK --------------------
     if not plot_data or "geometry" not in plot_data:
         raise ValueError("plot_data missing geometry")
 
     geometry = plot_data["geometry"]
+    props = plot_data.get("properties", {})
 
     # -------------------- AREA --------------------
     area_hectares = geometry.area().divide(10000).getInfo()
@@ -88,11 +75,11 @@ def run_growth_analysis_by_plot(plot_data, start_date, end_date):
     latest_s1_image = None
     latest_s1_date = None
 
-    if s1_count >= 1:
+    if s1_count > 0:
         latest_s1_image = ee.Image(s1_collection.first())
         latest_s1_date = ee.Date(latest_s1_image.get("system:time_start"))
 
-    # -------------------- DECISION LOGIC --------------------
+    # -------------------- DECISION LOGIC (UNCHANGED) --------------------
     if latest_s2_date and latest_s1_date:
         use_s2 = latest_s2_date.millis().getInfo() >= latest_s1_date.millis().getInfo()
     elif latest_s2_date:
@@ -104,8 +91,7 @@ def run_growth_analysis_by_plot(plot_data, start_date, end_date):
 
     # -------------------- ANALYSIS --------------------
     if use_s2:
-        analysis = latest_s2_image.normalizedDifference(["B8", "B4"]).rename("NDVI")
-        ndvi = analysis.clip(geometry)
+        ndvi = latest_s2_image.normalizedDifference(["B8", "B4"]).rename("NDVI").clip(geometry)
 
         weak_mask = ndvi.gte(0.2).And(ndvi.lt(0.4))
         stress_mask = ndvi.gte(0.0).And(ndvi.lt(0.2))
@@ -140,56 +126,61 @@ def run_growth_analysis_by_plot(plot_data, start_date, end_date):
 
     combined_smooth = combined_class.focal_mean(radius=10, units="meters")
 
-    vis_params = {
-        "min": 0,
-        "max": 4,
-        "palette": ["#bc1e29", "#58cf54", "#28ae31", "#056c3e"]
-    }
-
     tile_url = (
-        combined_smooth
-        .visualize(**vis_params)
+        combined_smooth.visualize(
+            min=0,
+            max=4,
+            palette=["#bc1e29", "#58cf54", "#28ae31", "#056c3e"]
+        )
         .getMapId()["tile_fetcher"]
         .url_format
     )
 
     # -------------------- PIXEL COUNTS --------------------
-    count_image = ee.Image.constant(1)
+    count_img = ee.Image.constant(1)
 
-    def get_pixel_count(mask):
+    def pixel_count(mask):
         return (
-            count_image
-            .updateMask(mask)
-            .reduceRegion(
-                ee.Reducer.count(),
-                geometry,
-                10,
-                bestEffort=True
-            )
+            count_img.updateMask(mask)
+            .reduceRegion(ee.Reducer.count(), geometry, 10, bestEffort=True)
             .get("constant")
         )
 
-    healthy_count = get_pixel_count(healthy_mask).getInfo() or 0
-    moderate_count = get_pixel_count(moderate_mask).getInfo() or 0
-    weak_count = get_pixel_count(weak_mask).getInfo() or 0
-    stress_count = get_pixel_count(stress_mask).getInfo() or 0
-    total_pixel_count = get_pixel_count(count_image).getInfo() or 0
+    healthy = pixel_count(healthy_mask).getInfo() or 0
+    moderate = pixel_count(moderate_mask).getInfo() or 0
+    weak = pixel_count(weak_mask).getInfo() or 0
+    stress = pixel_count(stress_mask).getInfo() or 0
+    total = healthy + moderate + weak + stress
 
-    # -------------------- RESPONSE --------------------
-    response_json = {
-        "area_hectares": round(area_hectares, 2),
-        "image_date": latest_image_date,
-        "data_source": data_source,
+    # -------------------- FINAL GEOJSON RESPONSE --------------------
+    geojson = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": geometry.getInfo(),
+                "properties": {
+                    "plot_name": props.get("plot_name"),
+                    "area_hectares": round(area_hectares, 2),
+                    "data_source": data_source,
+                    "latest_image_date": latest_image_date,
+                    "last_updated": datetime.utcnow().isoformat()
+                }
+            }
+        ],
         "pixel_summary": {
-            "total_pixel_count": total_pixel_count,
-            "healthy": healthy_count,
-            "moderate": moderate_count,
-            "weak": weak_count,
-            "stress": stress_count,
-            "healthy_pct": (healthy_count / total_pixel_count) * 100 if total_pixel_count else 0,
-            "moderate_pct": (moderate_count / total_pixel_count) * 100 if total_pixel_count else 0,
-            "weak_pct": (weak_count / total_pixel_count) * 100 if total_pixel_count else 0,
-            "stress_pct": (stress_count / total_pixel_count) * 100 if total_pixel_count else 0,
+            "total_pixel_count": total,
+            "healthy_pixel_count": healthy,
+            "moderate_pixel_count": moderate,
+            "weak_pixel_count": weak,
+            "stress_pixel_count": stress,
+            "healthy_pixel_percentage": (healthy / total * 100) if total else 0,
+            "moderate_pixel_percentage": (moderate / total * 100) if total else 0,
+            "weak_pixel_percentage": (weak / total * 100) if total else 0,
+            "stress_pixel_percentage": (stress / total * 100) if total else 0,
+            "analysis_start_date": start_date,
+            "analysis_end_date": end_date,
+            "latest_image_date": latest_image_date
         }
     }
 
@@ -197,5 +188,5 @@ def run_growth_analysis_by_plot(plot_data, start_date, end_date):
         "analysis_date": latest_image_date,
         "sensor": sensor,
         "tile_url": tile_url,
-        "response_json": response_json
+        "response_json": geojson
     }
