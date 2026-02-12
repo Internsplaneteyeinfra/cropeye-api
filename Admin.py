@@ -817,7 +817,7 @@ def get_cached_analysis(plot_id: str, analysis_type: str, analysis_date: str):
         return res.data[0]
 
     return None
-    def trigger_daily_growth_cron():
+def trigger_daily_growth_cron():
     print("🚀 DAILY GROWTH CRON TRIGGERED")
 
     try:
