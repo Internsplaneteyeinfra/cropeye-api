@@ -817,6 +817,7 @@ def get_cached_analysis(plot_id: str, analysis_type: str, analysis_date: str):
         return res.data[0]
 
     return None
+    
 def trigger_daily_growth_cron():
     print("🚀 DAILY GROWTH CRON TRIGGERED")
 
@@ -844,16 +845,6 @@ async def start_crons():
 
     scheduler.start()
     print("✅ APSCHEDULER STARTED", flush=True)
-
-def heartbeat():
-    print("💓 APSCHEDULER HEARTBEAT", flush=True)
-
-scheduler.add_job(
-    heartbeat,
-    CronTrigger(minute="*/1"),
-    id="heartbeat",
-    replace_existing=True,
-)
 
 
 
@@ -1891,42 +1882,6 @@ def get_vis_params(index_name):
     """Get visualization parameters for index"""
     return indexVisParams.get(index_name, {})
 
-
-
-
-@app.get("/satellite-updates/{plot_name}")
-async def check_satellite_updates(
-    plot_name: str,
-    end_date: str = Query(..., description="End date in YYYY-MM-DD format"),
-    start_date: str = Query(..., description="Start date in YYYY-MM-DD format")
-):
-    """Check for satellite updates for a specific plot"""
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-   
-    try:
-        aoi = plot_dict[plot_name]['geometry']
-       
-        # Get current collection info
-        coll = filter_s1(
-            ee.ImageCollection('COPERNICUS/S1_GRD'),
-            start_date, end_date, aoi
-        ).map(addIndices)
-       
-        current_satellite_update = get_latest_satellite_update(coll)
-        image_count = coll.size().getInfo()
-       
-        return {
-            "plot_name": plot_name,
-            "date_range": f"{start_date} to {end_date}",
-            "current_satellite_update": current_satellite_update,
-            "image_count": image_count,
-            "checked_at": datetime.now().isoformat()
-        }
-       
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Update check failed: {str(e)}") 
-
 def calculate_area_hectares(geometry):
     """Calculate area in hectares (approximate)"""
     try:
@@ -1940,6 +1895,7 @@ def calculate_area_hectares(geometry):
         print(f"Error calculating area: {e}")
         return None
 plot_service = PlotSyncService()
+
 @app.get("/distance")
 def calculate_distances(
     lat: float = Query(..., description="Factory latitude"),
@@ -2010,70 +1966,6 @@ def verify_worker(token):
     if not token or (token != WORKER_TOKEN and token != "local-dev"):
         raise HTTPException(status_code=403, detail="Unauthorized")
 
-
-@app.get("/internal/latest_satellite", include_in_schema=False)
-async def get_latest_satellite(plot_id: str = Query(...), x_worker_token: str = Header(None)):
-    verify_worker(x_worker_token)
-
-    try:
-        # Get plot data from database
-        plot_row = supabase.table("plots").select("plot_name, geojson").eq("id", plot_id).single().execute()
-        if not plot_row.data:
-            raise HTTPException(status_code=404, detail="Plot not found")
-
-        plot_name = plot_row.data["plot_name"]
-        geojson = plot_row.data["geojson"]
-
-        # Create geometry from geojson
-        geometry = ee.Geometry(geojson)
-
-        # Get latest satellite date
-        s1_collection = (
-            ee.ImageCollection("COPERNICUS/S1_GRD")
-            .filterBounds(geometry)
-            .sort("system:time_start", False)
-        )
-
-        result = get_latest_satellite_update(s1_collection)
-        if not result or result == "no_data":
-            raise HTTPException(status_code=404, detail="No satellite data found for this plot")
-
-        return {"date": result, "satellite": "sentinel-1"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching latest satellite: {str(e)}")
-
-@app.post("/internal/run_analysis", include_in_schema=False)
-async def run_analysis(request: Dict[str, Any], x_worker_token: str = Header(None)):
-    verify_worker(x_worker_token)
-
-    plot_id = request.get("plot_id")
-    analysis_type = request.get("analysis_type", "growth")
-
-    if not plot_id:
-        raise HTTPException(status_code=400, detail="plot_id is required")
-
-    try:
-        # Get plot name from plot_id
-        plot_row = supabase.table("plots").select("plot_name").eq("id", plot_id).single().execute()
-        if not plot_row.data:
-            raise HTTPException(status_code=404, detail="Plot not found")
-
-        plot_name = plot_row.data["plot_name"]
-
-        # Run analysis
-        result_json, tile_url, sensor, image_date = run_growth_analysis_by_plot_name(plot_name)
-
-        return {
-            "sensor_used": sensor,
-            "tile_url": tile_url,
-            "result": result_json,
-            "analysis_date": image_date
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 @app.post("/internal/daily_satellite_sync", include_in_schema=False)
 async def daily_satellite_sync(x_worker_token: str = Header(None)):
@@ -2153,36 +2045,6 @@ async def daily_satellite_sync(x_worker_token: str = Header(None)):
     print("📊 Daily Sync Summary:", results)
     return result
 
-@app.get("/internal/satellite_range")
-def satellite_range(
-    plot_id: str,
-    start: str,
-    end: str,
-    x_worker_token: str = Header(None)
-):
-    if x_worker_token != WORKER_TOKEN:
-        raise HTTPException(status_code=401, detail="Invalid worker token")
-
-    try:
-        start_date = datetime.fromisoformat(start).date()
-        end_date = datetime.fromisoformat(end).date()
-    except:
-        raise HTTPException(status_code=400, detail="Bad date format, use YYYY-MM-DD")
-
-    # 🛰 MOCK — replace with real GEE call later
-    dates = []
-    current = start_date
-
-    while current <= end_date:
-        # Simulate Sentinel pass every 5 days
-        dates.append(current.isoformat())
-        current += timedelta(days=5)
-
-    return {
-        "plot_id": plot_id,
-        "satellite": "sentinel-1",
-        "dates": dates
-    }
 
 if __name__ == "__main__":
     uvicorn.run("Admin:app", host="0.0.0.0", port=3000, reload=True)
